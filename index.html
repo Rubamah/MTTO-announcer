@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Now Serving</title>
+  <style>
+    body { background: black; color: white; text-align: center; font-family: Arial, sans-serif; }
+    h1 { font-size: 4em; margin-top: 20%; }
+    #number { font-size: 8em; margin-top: 20px; }
+  </style>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
+</head>
+<body>
+  <h1>Now Serving</h1>
+  <div id="number">-</div>
+
+  <script>
+    // Firebase config
+    const firebaseConfig = {
+      apiKey: "AIzaSyCWWnMsge75Q3_MDF9Aj9wo4C5KD6RVGfw",
+      authDomain: "q-matic-b7d77.firebaseapp.com",
+      databaseURL: "https://q-matic-b7d77-default-rtdb.firebaseio.com",
+      projectId: "q-matic-b7d77",
+      storageBucket: "q-matic-b7d77.appspot.com",
+      messagingSenderId: "908187704899",
+      appId: "1:908187704899:web:b8bcf33cda90bafe81bef6"
+    };
+
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    const numDiv = document.getElementById("number");
+    let lastUpdateTime = 0;
+
+    db.ref("latest").on("value", snap => {
+      const data = snap.val();
+      if (!data) return;
+
+      const now = Date.now();
+      if (now - lastUpdateTime < 20000) return; // enforce 20 seconds
+
+      lastUpdateTime = now;
+      numDiv.textContent = data.number;
+
+      // Speak the number twice
+      let utterance = new SpeechSynthesisUtterance(data.number.toString());
+      utterance.lang = "en-US";
+      speechSynthesis.speak(utterance);
+      setTimeout(() => speechSynthesis.speak(utterance), 1500);
+    });
+  </script>
+</body>
+</html>
