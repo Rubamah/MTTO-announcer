@@ -1,55 +1,398 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ar" dir="rtl">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Now Serving</title>
-  <style>
-    body { background: black; color: white; text-align: center; font-family: Arial, sans-serif; }
-    h1 { font-size: 4em; margin-top: 20%; }
-    #number { font-size: 8em; margin-top: 20px; }
-  </style>
-  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Main TTO Announcer</title>
+
+<style>
+  body {
+    background:#f5f7fb;
+    font-family:-apple-system,system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:#0f172a;
+    margin:0;
+    text-align:center;
+  }
+
+  #call {
+    display:none;
+    width:min(960px,94vw);
+    margin:40px auto;
+    background:#000;
+    color:#fff;
+    border-radius:16px;
+    padding:32px 18px;
+    font-weight:800;
+    font-size:clamp(26px,4.5vw,40px);
+    line-height:1.6;
+  }
+
+  #call b {
+    font-weight:800;
+  }
+
+  #soundGate {
+    position:fixed;
+    inset:0;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:rgba(0,0,0,.75);
+    color:#fff;
+    z-index:10;
+    font-size:22px;
+  }
+
+  #soundGate button {
+    margin-top:14px;
+    padding:10px 18px;
+    border:0;
+    border-radius:10px;
+    background:#2563eb;
+    color:#fff;
+    font-weight:800;
+    cursor:pointer;
+  }
+</style>
+
+<script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
 </head>
+
 <body>
-  <h1>Now Serving</h1>
-  <div id="number">-</div>
 
-  <script>
-    // Firebase config
-    const firebaseConfig = {
-      apiKey: "AIzaSyCWWnMsge75Q3_MDF9Aj9wo4C5KD6RVGfw",
-      authDomain: "q-matic-b7d77.firebaseapp.com",
-      databaseURL: "https://q-matic-b7d77-default-rtdb.firebaseio.com",
-      projectId: "q-matic-b7d77",
-      storageBucket: "q-matic-b7d77.appspot.com",
-      messagingSenderId: "908187704899",
-      appId: "1:908187704899:web:b8bcf33cda90bafe81bef6"
-    };
+<div id="soundGate">
+  <div>
+    اضغط “تفعيل الصوت” مرة واحدة للسماح بالتشغيل الصوتي.
+    <br>
+    <button id="enableBtn">تفعيل الصوت</button>
+  </div>
+</div>
 
-    firebase.initializeApp(firebaseConfig);
-    const db = firebase.database();
+<div id="call">
+  تذكرة رقم (<b id="tNum"></b>)
 
-    const numDiv = document.getElementById("number");
-    let lastUpdateTime = 0;
+  <span id="wWrap" style="display:none">
+    ، الرجاء التوجه إلى شباك
+    <b id="wNum"></b>
+  </span>
+</div>
 
-    db.ref("latest").on("value", snap => {
-      const data = snap.val();
-      if (!data) return;
+<script>
 
-      const now = Date.now();
-      if (now - lastUpdateTime < 20000) return; // enforce 20 seconds
+/* ========== Firebase ========== */
 
-      lastUpdateTime = now;
-      numDiv.textContent = data.number;
+const cfg = {
+  apiKey:"AIzaSyCWWnMsge75Q3_MDF9Aj9wo4C5KD6RVGfw",
+  authDomain:"q-matic-b7d77.firebaseapp.com",
+  databaseURL:"https://q-matic-b7d77-default-rtdb.firebaseio.com",
+  projectId:"q-matic-b7d77",
+  storageBucket:"q-matic-b7d77.appspot.com",
+  messagingSenderId:"908187704899",
+  appId:"1:908187704899:web:b8bcf33cda90bafe81bef6"
+};
 
-      // Speak the number twice
-      let utterance = new SpeechSynthesisUtterance(data.number.toString());
-      utterance.lang = "en-US";
-      speechSynthesis.speak(utterance);
-      setTimeout(() => speechSynthesis.speak(utterance), 1500);
+if (!firebase.apps.length) {
+  firebase.initializeApp(cfg);
+}
+
+const db = firebase.database();
+
+/*
+  التغيير الوحيد عن كود القلب
+*/
+const ROOT = "main_TTO";
+
+
+/* ========== العناصر ========== */
+
+const callEl = document.getElementById("call");
+const tNumEl = document.getElementById("tNum");
+const wWrap  = document.getElementById("wWrap");
+const wNumEl = document.getElementById("wNum");
+
+
+/* ========== الأدوات ========== */
+
+function toArDigits(n) {
+  return String(n).replace(
+    /\d/g,
+    d => "٠١٢٣٤٥٦٧٨٩"[d]
+  );
+}
+
+
+/* ========== الصوت ========== */
+
+let ttsReady = false;
+
+document.getElementById("enableBtn").onclick = () => {
+  try {
+    window.speechSynthesis.cancel();
+  } catch(e) {}
+
+  ttsReady = true;
+
+  document.getElementById("soundGate").style.display = "none";
+};
+
+window.speechSynthesis.onvoiceschanged = () => {
+  pickArabicVoice();
+};
+
+function pickArabicVoice() {
+  const voices =
+    window.speechSynthesis.getVoices() || [];
+
+  const byName = voices.find(v =>
+    /naayf|naif|hoda|maged|arabic/i.test(v.name)
+  );
+
+  if (byName) {
+    return byName;
+  }
+
+  const byLang = voices.find(v =>
+    /ar(-|_)?[A-Z]{2}/i.test(v.lang)
+  );
+
+  return byLang || voices[0] || null;
+}
+
+function speakOnce(text) {
+  return new Promise(resolve => {
+
+    if (
+      !ttsReady ||
+      !("speechSynthesis" in window)
+    ) {
+      resolve();
+      return;
+    }
+
+    text = text
+      .replace(/[ٌٍْـ]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const utterance =
+      new SpeechSynthesisUtterance(text);
+
+    utterance.lang = "ar-SA";
+    utterance.rate = 1.1;
+    utterance.pitch = 1.0;
+
+    const voice = pickArabicVoice();
+
+    if (voice) {
+      utterance.voice = voice;
+    }
+
+    utterance.onend = resolve;
+    utterance.onerror = resolve;
+
+    window.speechSynthesis.speak(utterance);
+  });
+}
+
+
+/* ========== نطق رقم الشباك ========== */
+
+function fixNumberWord(n) {
+  const map = {
+    1: "واحِد",
+    2: "اِثنان",
+    3: "ثَلاثَة",
+    4: "أَربَعَة",
+    5: "خَمسَة",
+    6: "سِتَّة",
+    7: "سَبعَة",
+    8: "ثَمانِيَة",
+    9: "تِسعَة",
+    10: "عَشَرَة"
+  };
+
+  return map[n]
+    ? map[n]
+    : toArDigits(n);
+}
+
+
+/* ========== الجملة ========== */
+
+function buildFastPhrase(n, w) {
+  const z = "\u200C";
+  const num = toArDigits(n);
+
+  const wnum =
+    w == null || w === ""
+      ? ""
+      : fixNumberWord(w);
+
+  if (!wnum) {
+    return `تَذْكِرَةُ رقم${z} ${num}`;
+  }
+
+  return (
+    `تَذْكِرَةُ${z} رقم${z} ${num} ` +
+    `الرجاء${z} التوجه${z} إلى${z} ` +
+    `الشُبّاك${z} رقم${z} ${wnum}`
+  );
+}
+
+
+/* ========== الطابور الصوتي ========== */
+
+const queue = [];
+let playing = false;
+
+const processed = new Set();
+const bootTs = Date.now() - 5000;
+
+function enqueue(item) {
+  queue.push(item);
+
+  if (!playing) {
+    playNext();
+  }
+}
+
+async function playNext() {
+
+  if (queue.length === 0) {
+    playing = false;
+    return;
+  }
+
+  playing = true;
+
+  const {
+    number,
+    windowNum
+  } = queue.shift();
+
+  tNumEl.textContent = number;
+
+  if (
+    windowNum != null &&
+    windowNum !== ""
+  ) {
+    wNumEl.textContent = windowNum;
+    wWrap.style.display = "inline";
+  } else {
+    wWrap.style.display = "none";
+  }
+
+  callEl.style.display = "block";
+
+  db.ref(`${ROOT}/activeCall`).set({
+    number:number,
+    window:windowNum
+  });
+
+  const phrase =
+    buildFastPhrase(number, windowNum);
+
+  await speakOnce(phrase);
+
+  await new Promise(resolve =>
+    setTimeout(resolve, 1000)
+  );
+
+  playNext();
+}
+
+
+/* ========== جلب رقم الشباك ========== */
+
+async function resolveWindow(v, n) {
+
+  let candidate =
+    v.window ??
+    v.win ??
+    v.windowNum ??
+    v.counter ??
+    null;
+
+  if (typeof candidate === "string") {
+    const parsed = Number(candidate);
+
+    candidate =
+      Number.isNaN(parsed)
+        ? candidate.trim()
+        : parsed;
+  }
+
+  if (
+    candidate == null ||
+    candidate === "" ||
+    Number.isNaN(candidate)
+  ) {
+    try {
+      const assignment =
+        await firebase.database()
+          .ref(`${ROOT}/assignment/${n}/window`)
+          .get();
+
+      if (assignment.exists()) {
+        candidate = assignment.val();
+      }
+    } catch(e) {}
+  }
+
+  if (
+    candidate == null ||
+    candidate === "" ||
+    Number.isNaN(candidate)
+  ) {
+    try {
+      const operatorWindow =
+        await firebase.database()
+          .ref(`${ROOT}/operatorWindow`)
+          .get();
+
+      if (operatorWindow.exists()) {
+        candidate = operatorWindow.val();
+      }
+    } catch(e) {}
+  }
+
+  return candidate;
+}
+
+
+/* ========== مستمع Firebase ========== */
+
+db.ref(`${ROOT}/calls`)
+  .orderByChild("ts")
+  .startAt(bootTs)
+  .on("child_added", async snapshot => {
+
+    const key = snapshot.key;
+    const value = snapshot.val() || {};
+
+    if (processed.has(key)) {
+      return;
+    }
+
+    processed.add(key);
+
+    const number = Number(value.number);
+
+    if (!number) {
+      return;
+    }
+
+    const windowNumber =
+      await resolveWindow(value, number);
+
+    enqueue({
+      number:number,
+      windowNum:windowNumber
     });
-  </script>
+  });
+
+</script>
+
 </body>
 </html>
