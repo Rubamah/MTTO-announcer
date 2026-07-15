@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Now Serving</title>
+  <style>
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      margin: 0;
+      background: #000;
+      color: #fff;
+      font-family: Arial, sans-serif;
+      font-size: 5em;
+      text-align: center;
+      flex-direction: column;
+    }
+    #display {
+      font-size: 20vw;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <div>Now Serving</div>
+  <div id="display">—</div>
+
+  <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyCWWnMsge75Q3_MDF9Aj9wo4C5KD6RVGfw",
+      authDomain: "q-matic-b7d77.firebaseapp.com",
+      databaseURL: "https://q-matic-b7d77-default-rtdb.firebaseio.com",
+      projectId: "q-matic-b7d77",
+      storageBucket: "q-matic-b7d77.appspot.com",
+      messagingSenderId: "908187704899",
+      appId: "1:908187704899:web:b8bcf33cda90bafe81bef6",
+      measurementId: "G-VT1P6V5TEY"
+    };
+
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    const display = document.getElementById('display');
+
+    let lastUpdateTime = 0;
+    let pendingNumber = null;
+
+    function speakNumber(num) {
+      const msg1 = new SpeechSynthesisUtterance(num.toString());
+      const msg2 = new SpeechSynthesisUtterance(num.toString());
+      msg1.lang = "en-US";
+      msg2.lang = "en-US";
+      msg1.rate = msg2.rate = 0.9;
+      msg1.pitch = msg2.pitch = 1.1;
+      window.speechSynthesis.speak(msg1);
+      window.speechSynthesis.speak(msg2);
+    }
+
+    db.ref("latestNumber").on("value", (snapshot) => {
+      if (!snapshot.exists()) return;
+
+      const newNumber = snapshot.val();
+      const now = Date.now();
+      const elapsed = (now - lastUpdateTime) / 1000;
+
+      if (elapsed >= 20) {
+        // update immediately
+        display.textContent = newNumber;
+        speakNumber(newNumber);
+        lastUpdateTime = now;
+      } else {
+        // wait until 20s pass
+        pendingNumber = newNumber;
+
+        setTimeout(() => {
+          if (pendingNumber !== null) {
+            display.textContent = pendingNumber;
+            speakNumber(pendingNumber);
+            lastUpdateTime = Date.now();
+            pendingNumber = null;
+          }
+        }, (20 - elapsed) * 1000);
+      }
+    });
+  </script>
+</body>
+</html>
