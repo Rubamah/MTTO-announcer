@@ -19,7 +19,7 @@ async def main():
     for number, word in COUNTERS.items():
         path = OUT / f'counter{number}.mp3'
 
-        text = f'الرَّجاء التَّوَجُّه إِلَى الشُّبَّاك رَقْم {word}'
+        text = f'الرَّجاء التَّوَجُّه إِلَى الشُّبَّاك رَقَمْ {word}'
 
         for attempt in range(5):
             try:
