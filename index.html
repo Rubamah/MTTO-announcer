@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Main TTO Announcer</title>
+<style>
+:root{--bg:#000;--text:#fff;--muted:#a3a3a3;--green:#22c55e;--amber:#f59e0b;--red:#ef4444;--blue:#2563eb}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;background:var(--bg);color:var(--text);font-family:Arial,Tahoma,sans-serif}
+body{display:flex;align-items:center;justify-content:center;overflow:hidden}
+.wrap{width:min(94vw,760px);text-align:center;padding:18px}
+.label{font-size:clamp(22px,4.5vw,48px);font-weight:900;margin-bottom:4px}
+#number{font-size:clamp(82px,22vw,220px);font-weight:900;line-height:.95;margin:8px 0}
+#counter{font-size:clamp(18px,4vw,38px);min-height:1.3em;font-weight:800}
+#status{margin-top:18px;font-size:14px;color:var(--muted);direction:ltr}
+#gate{position:fixed;inset:0;background:#080808;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:18px;z-index:10;text-align:center;padding:24px}
+#gate h2{margin:0;font-size:clamp(24px,5vw,38px)}
+#gate p{margin:0;max-width:520px;color:#bbb;font-size:15px;line-height:1.6}
+button{background:var(--blue);color:#fff;border:0;border-radius:14px;font-size:24px;font-weight:800;padding:17px 30px;cursor:pointer}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-inline-end:6px;background:#777}
+.dot.ok{background:var(--green)}.dot.warn{background:var(--amber)}.dot.bad{background:var(--red)}
+@media (max-width:420px),(max-height:420px){
+  .wrap{padding:8px}.label{font-size:22px}#number{font-size:74px;margin:4px 0}#counter{font-size:18px}#status{font-size:11px;margin-top:8px}
+}
+</style>
+<script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
+</head>
+<body>
+
+<div id="gate">
+  <h2>منادي Main TTO</h2>
+  <button id="enable">تفعيل الصوت</button>
+  <p>اضغط مرة واحدة بعد فتح المنادي. بعدها اتركه مفتوحًا على جنب.</p>
+</div>
+
+<div class="wrap">
+  <div class="label">Now Serving</div>
+  <div id="number">-</div>
+  <div id="counter"></div>
+  <div id="status"><span class="dot" id="dot"></span><span id="statusText">Connecting...</span></div>
+</div>
+
+<script>
+const cfg={
+  apiKey:"AIzaSyCWWnMsge75Q3_MDF9Aj9wo4C5KD6RVGfw",
+  authDomain:"q-matic-b7d77.firebaseapp.com",
+  databaseURL:"https://q-matic-b7d77-default-rtdb.firebaseio.com",
+  projectId:"q-matic-b7d77",
+  storageBucket:"q-matic-b7d77.appspot.com",
+  messagingSenderId:"908187704899",
+  appId:"1:908187704899:web:b8bcf33cda90bafe81bef6"
+};
+
+if(!firebase.apps.length)firebase.initializeApp(cfg);
+
+const db=firebase.database();
+const ROOT="main_TTO";
+
+const numberEl=document.getElementById("number");
+const counterEl=document.getElementById("counter");
+const statusText=document.getElementById("statusText");
+const dot=document.getElementById("dot");
+const gate=document.getElementById("gate");
+
+let enabled=false;
+let connected=false;
+let playing=false;
+let currentEventId=null;
+let lastPlayedTs=0;
+let lastPlayedEventId=null;
+let bootstrapped=false;
+
+const pending=[];
+const seenIds=new Set();
+
+const ticketPlayer=new Audio();
+const counterPlayer=new Audio();
+ticketPlayer.preload="auto";
+counterPlayer.preload="auto";
+
+const COUNTER_EARLY_MS=700;
+
+// If the browser wakes after a real freeze and events are already old,
+// we discard that stale backlog and jump to latest only.
+const STALE_MS=15000;
+
+function wait(ms){return new Promise(r=>setTimeout(r,ms));}
+
+function setStatus(text,kind=""){
+  statusText.textContent=text;
+  dot.className="dot"+(kind?(" "+kind):"");
+}
+
+function getCounter(v){
+  const raw=v?.windowNum??v?.window??v?.counter??v?.win??null;
+  if(raw===null||raw==="")return null;
+  const m=String(raw).match(/\d+/);
+  const n=m?Number(m[0]):NaN;
+  return Number.isInteger(n)&&n>=1&&n<=4?n:null;
+}
+
+function normalize(v,key=null){
+  const n=Number(v?.number);
+  const ts=Number(v?.ts)||0;
+  const counter=getCounter(v);
+  const eventId=String(v?.eventId||key||"");
+  if(!(n>=1&&n<=1000)||!ts||!eventId)return null;
+  return {eventId,number:n,counter,ts,kind:v?.kind||"call"};
+}
+
+function render(item){
+  if(!item)return;
+  numberEl.textContent=item.number;
+  counterEl.textContent=item.counter?`الشُبّاك رقم ${item.counter}`:"";
+}
+
+async function playFile(player,path){
+  return new Promise(resolve=>{
+    let done=false;
+    const finish=ok=>{
+      if(done)return;
+      done=true;
+      player.onended=null;
+      player.onerror=null;
+      resolve(ok);
+    };
+
+    player.onended=()=>finish(true);
+    player.onerror=()=>finish(false);
+
+    try{
+      player.pause();
+      player.currentTime=0;
+      player.src=path;
+      player.load();
+      const p=player.play();
+      if(p&&typeof p.catch==="function")p.catch(()=>finish(false));
+    }catch(e){
+      finish(false);
+    }
+  });
+}
+
+async function playAnnouncement(item){
+  ticketPlayer.pause();
+  counterPlayer.pause();
+
+  ticketPlayer.src=`audio/${item.number}.mp3`;
+  ticketPlayer.load();
+
+  let ticketResolve;
+  const ticketDone=new Promise(r=>ticketResolve=r);
+  let ticketOK=true;
+  let counterStarted=false;
+  let counterPromise=Promise.resolve(true);
+  let earlyTimer=null;
+
+  const startCounter=()=>{
+    if(counterStarted||!item.counter)return;
+    counterStarted=true;
+    counterPromise=playFile(counterPlayer,`audio/counter${item.counter}.mp3`);
+  };
+
+  ticketPlayer.onerror=()=>{
+    ticketOK=false;
+    if(earlyTimer)clearTimeout(earlyTimer);
+    ticketResolve();
+  };
+
+  ticketPlayer.onended=()=>{
+    if(earlyTimer)clearTimeout(earlyTimer);
+    if(item.counter&&!counterStarted)startCounter();
+    ticketResolve();
+  };
+
+  ticketPlayer.onloadedmetadata=()=>{
+    if(!item.counter||counterStarted)return;
+    const d=Number(ticketPlayer.duration);
+    if(Number.isFinite(d)&&d>0){
+      earlyTimer=setTimeout(startCounter,Math.max(0,d*1000-COUNTER_EARLY_MS));
+    }
+  };
+
+  try{
+    await ticketPlayer.play();
+  }catch(e){
+    ticketOK=false;
+    ticketResolve();
+  }
+
+  await ticketDone;
+
+  if(item.counter&&!counterStarted)startCounter();
+  const counterOK=await counterPromise;
+
+  ticketPlayer.onended=null;
+  ticketPlayer.onerror=null;
+  ticketPlayer.onloadedmetadata=null;
+
+  return {ticketOK,counterOK};
+}
+
+function enqueue(item){
+  if(!item)return;
+  if(seenIds.has(item.eventId))return;
+  if(item.ts<lastPlayedTs)return;
+
+  seenIds.add(item.eventId);
+  pending.push(item);
+  pending.sort((a,b)=>a.ts-b.ts || a.eventId.localeCompare(b.eventId));
+  pump();
+}
+
+async function pump(){
+  if(playing||!enabled)return;
+  playing=true;
+
+  try{
+    while(pending.length&&enabled){
+      const item=pending.shift();
+
+      if(item.ts<lastPlayedTs)continue;
+
+      currentEventId=item.eventId;
+      render(item);
+      setStatus(`${item.kind==="recall"?"Recall":"Call"} ${item.number} • Counter ${item.counter||"-"}`,"ok");
+
+      const result=await playAnnouncement(item);
+
+      if(!result.ticketOK){
+        setStatus("Audio retry pending","warn");
+        // Put only this failed current event back at the front.
+        pending.unshift(item);
+        seenIds.delete(item.eventId);
+        await wait(1000);
+        break;
+      }
+
+      lastPlayedTs=Math.max(lastPlayedTs,item.ts);
+      lastPlayedEventId=item.eventId;
+      currentEventId=null;
+
+      if(item.counter&&!result.counterOK){
+        setStatus(`Ticket ${item.number} played • counter audio failed`,"warn");
+      }else{
+        setStatus(connected?"Connected • Ready":"Reconnecting...",connected?"ok":"warn");
+      }
+
+      // Prevent different patients/recalls from overlapping.
+      await wait(300);
+    }
+  }finally{
+    playing=false;
+    if(pending.length&&enabled)setTimeout(pump,0);
+  }
+}
+
+async function recoverLatest(reason="wake",dropBacklog=true){
+  try{
+    const snap=await db.ref(`${ROOT}/latest`).get();
+    const item=normalize(snap.val()||{},snap.val()?.eventId||null);
+    if(!item)return;
+
+    render(item);
+
+    if(!bootstrapped){
+      lastPlayedTs=item.ts;
+      lastPlayedEventId=item.eventId;
+      bootstrapped=true;
+      return;
+    }
+
+    if(item.ts<=lastPlayedTs||item.eventId===lastPlayedEventId||item.eventId===currentEventId)return;
+
+    if(dropBacklog){
+      // Real wake/reconnect recovery: discard stale backlog and keep ONLY latest.
+      pending.length=0;
+      seenIds.clear();
+      enqueue(item);
+    }else{
+      // Normal safety sync: preserve the live queue and only add the missing latest event.
+      enqueue(item);
+    }
+
+  }catch(e){
+    setStatus("Reconnecting to Firebase...","warn");
+  }
+}
+
+async function bootstrap(){
+  try{
+    const latestSnap=await db.ref(`${ROOT}/latest`).get();
+    const latest=normalize(latestSnap.val()||{},latestSnap.val()?.eventId||null);
+
+    if(latest){
+      render(latest);
+      lastPlayedTs=latest.ts;
+      lastPlayedEventId=latest.eventId;
+    }
+
+    bootstrapped=true;
+
+    const startAtTs=lastPlayedTs?lastPlayedTs+1:Date.now();
+
+    db.ref(`${ROOT}/announcementQueue`)
+      .orderByChild("ts")
+      .startAt(startAtTs)
+      .on("child_added",snap=>{
+        const item=normalize(snap.val()||{},snap.key);
+        if(!item)return;
+
+        const age=Date.now()-item.ts;
+
+        if(age>STALE_MS){
+          // This normally means the page/browser was asleep.
+          recoverLatest("stale");
+          return;
+        }
+
+        enqueue(item);
+      },()=>{
+        setStatus("Announcement listener disconnected","warn");
+      });
+
+    // Catch anything that happened between initial latest read and listener attachment.
+    await recoverLatest("post-listener",false);
+
+  }catch(e){
+    setStatus("Startup connection error","warn");
+  }
+}
+
+db.ref(".info/connected").on("value",snap=>{
+  connected=snap.val()===true;
+  if(connected){
+    setStatus(enabled?"Connected • Ready":"Connected • Enable audio","ok");
+    if(bootstrapped)recoverLatest("reconnected");
+  }else{
+    setStatus("Reconnecting...","warn");
+  }
+});
+
+// Wake / resume recovery.
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState==="visible")recoverLatest("visible");
+});
+window.addEventListener("focus",()=>recoverLatest("focus"));
+window.addEventListener("pageshow",()=>recoverLatest("pageshow"));
+window.addEventListener("online",()=>recoverLatest("online"));
+document.addEventListener("resume",()=>recoverLatest("resume"));
+
+if(document.wasDiscarded){
+  setTimeout(()=>recoverLatest("discarded"),0);
+}
+
+// While the page is alive, this is a safety check.
+// If Chrome actually freezes the app, this timer pauses; the wake handlers above recover latest.
+setInterval(()=>{
+  if(enabled)recoverLatest("periodic",false);
+},15000);
+
+function prime(player,path){
+  try{
+    player.muted=true;
+    player.src=path;
+    player.load();
+
+    const p=player.play();
+
+    if(p&&typeof p.then==="function"){
+      p.then(()=>{
+        player.pause();
+        player.currentTime=0;
+        player.muted=false;
+      }).catch(()=>{
+        player.muted=false;
+      });
+    }else{
+      player.muted=false;
+    }
+  }catch(e){
+    player.muted=false;
+  }
+}
+
+document.getElementById("enable").onclick=()=>{
+  enabled=true;
+
+  // Unlock both MP3 players from one real user gesture.
+  prime(ticketPlayer,"audio/1.mp3");
+  prime(counterPlayer,"audio/counter1.mp3");
+
+  gate.style.display="none";
+  setStatus(connected?"Connected • Ready":"Connecting...",connected?"ok":"");
+  recoverLatest("enable");
+  pump();
+};
+
+bootstrap();
+</script>
+
+<!-- Aggressive Screen Wake Lock -->
+<script>
+(function(){
+  let wakeLock = null;
+  let requesting = false;
+  let retryTimer = null;
+
+  async function requestWakeLock(){
+    if(requesting) return;
+    if(!("wakeLock" in navigator)) return;
+    if(document.visibilityState !== "visible") return;
+
+    if(wakeLock && wakeLock.released === false) return;
+
+    requesting = true;
+    try{
+      wakeLock = await navigator.wakeLock.request("screen");
+
+      wakeLock.addEventListener("release", ()=>{
+        wakeLock = null;
+        clearTimeout(retryTimer);
+        retryTimer = setTimeout(requestWakeLock, 300);
+      }, {once:true});
+
+    }catch(e){
+      wakeLock = null;
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(requestWakeLock, 1500);
+    }finally{
+      requesting = false;
+    }
+  }
+
+  // Try immediately, then aggressively reacquire whenever the page becomes usable again.
+  requestWakeLock();
+
+  document.addEventListener("visibilitychange", ()=>{
+    if(document.visibilityState === "visible"){
+      requestWakeLock();
+    }
+  });
+
+  window.addEventListener("focus", requestWakeLock);
+  window.addEventListener("pageshow", requestWakeLock);
+  window.addEventListener("online", requestWakeLock);
+
+  // Any real interaction is another chance to acquire the lock.
+  ["pointerdown","touchstart","keydown","click"].forEach(type=>{
+    window.addEventListener(type, requestWakeLock, {passive:true});
+  });
+
+  // Safety check: if browser/OS releases it unexpectedly, request it again.
+  setInterval(requestWakeLock, 5000);
+
+  // Expose for the rest of the page if needed.
+  window.__mainTTOWakeLock = {
+    request: requestWakeLock,
+    active: ()=>Boolean(wakeLock && wakeLock.released === false)
+  };
+})();
+</script>
+
+</body>
+</html>
