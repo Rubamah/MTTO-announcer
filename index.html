@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Main TTO Announcer</title>
+
+<style>
+:root{
+  --bg:#000;
+  --card:#0b0b0b;
+  --text:#fff;
+  --muted:#a3a3a3;
+  --green:#22c55e;
+  --amber:#f59e0b;
+  --red:#ef4444;
+  --blue:#2563eb;
+}
+*{box-sizing:border-box}
+html,body{
+  margin:0;
+  width:100%;
+  height:100%;
+  background:var(--bg);
+  color:var(--text);
+  font-family:Arial,Tahoma,sans-serif;
+}
+body{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  overflow:hidden;
+}
+.wrap{
+  width:min(94vw,760px);
+  text-align:center;
+  padding:18px;
+}
+.label{
+  font-size:clamp(22px,4.5vw,48px);
+  font-weight:900;
+  margin-bottom:4px;
+}
+#number{
+  font-size:clamp(82px,22vw,220px);
+  font-weight:900;
+  line-height:.95;
+  margin:8px 0;
+}
+#counter{
+  font-size:clamp(18px,4vw,38px);
+  min-height:1.3em;
+  font-weight:800;
+}
+#status{
+  margin-top:18px;
+  font-size:14px;
+  color:var(--muted);
+  direction:ltr;
+}
+#gate{
+  position:fixed;
+  inset:0;
+  background:#080808;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  flex-direction:column;
+  gap:18px;
+  z-index:10;
+  text-align:center;
+  padding:24px;
+}
+#gate h2{
+  margin:0;
+  font-size:clamp(24px,5vw,38px);
+}
+#gate p{
+  margin:0;
+  max-width:520px;
+  color:#bbb;
+  font-size:15px;
+  line-height:1.6;
+}
+button{
+  background:var(--blue);
+  color:#fff;
+  border:0;
+  border-radius:14px;
+  font-size:24px;
+  font-weight:800;
+  padding:17px 30px;
+  cursor:pointer;
+}
+.dot{
+  display:inline-block;
+  width:9px;
+  height:9px;
+  border-radius:50%;
+  margin-inline-end:6px;
+  background:#777;
+}
+.dot.ok{background:var(--green)}
+.dot.warn{background:var(--amber)}
+.dot.bad{background:var(--red)}
+
+@media (max-width:420px), (max-height:420px){
+  .wrap{padding:8px}
+  .label{font-size:22px}
+  #number{font-size:74px;margin:4px 0}
+  #counter{font-size:18px}
+  #status{font-size:11px;margin-top:8px}
+}
+</style>
+
+<script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
+</head>
+
+<body>
+
+<div id="gate">
+  <h2>منادي Main TTO</h2>
+  <button id="enable">تفعيل الصوت</button>
+  <p>
+    اضغط مرة واحدة بعد فتح البرنامج. بعدها يمكن ترك نافذة المنادي على جنب.
+  </p>
+</div>
+
+<div class="wrap">
+  <div class="label">Now Serving</div>
+  <div id="number">-</div>
+  <div id="counter"></div>
+  <div id="status"><span class="dot" id="dot"></span><span id="statusText">Connecting...</span></div>
+</div>
+
+<script>
+const cfg={
+  apiKey:"AIzaSyCWWnMsge75Q3_MDF9Aj9wo4C5KD6RVGfw",
+  authDomain:"q-matic-b7d77.firebaseapp.com",
+  databaseURL:"https://q-matic-b7d77-default-rtdb.firebaseio.com",
+  projectId:"q-matic-b7d77",
+  storageBucket:"q-matic-b7d77.appspot.com",
+  messagingSenderId:"908187704899",
+  appId:"1:908187704899:web:b8bcf33cda90bafe81bef6"
+};
+
+if(!firebase.apps.length) firebase.initializeApp(cfg);
+
+const db=firebase.database();
+const ROOT="main_TTO";
+
+const numberEl=document.getElementById("number");
+const counterEl=document.getElementById("counter");
+const statusText=document.getElementById("statusText");
+const dot=document.getElementById("dot");
+const gate=document.getElementById("gate");
+const enableBtn=document.getElementById("enable");
+
+let enabled=false;
+let connected=false;
+let playing=false;
+let currentTs=0;
+let lastPlayedTs=0;
+let pending=null;
+let bootstrapped=false;
+let lastWakeSync=0;
+
+// Separate players so the counter can start slightly before the ticket MP3 fully ends.
+const ticketPlayer=new Audio();
+const counterPlayer=new Audio();
+ticketPlayer.preload="auto";
+counterPlayer.preload="auto";
+
+const COUNTER_EARLY_MS=700;
+
+function wait(ms){
+  return new Promise(r=>setTimeout(r,ms));
+}
+
+function setStatus(text,kind=""){
+  statusText.textContent=text;
+  dot.className="dot"+(kind?(" "+kind):"");
+}
+
+function getCounter(v){
+  const raw=v?.windowNum ?? v?.window ?? v?.counter ?? v?.win ?? null;
+  if(raw===null || raw==="") return null;
+  const m=String(raw).match(/\d+/);
+  const n=m ? Number(m[0]) : NaN;
+  return Number.isInteger(n) && n>=1 && n<=4 ? n : null;
+}
+
+async function resolveCounter(v,n){
+  const direct=getCounter(v);
+  if(direct) return direct;
+
+  // Fallback for older control-page versions where latest did not store the counter.
+  try{
+    const s=await db.ref(`${ROOT}/calls/${n}`).get();
+    return getCounter(s.val()||{});
+  }catch(e){
+    return null;
+  }
+}
+
+function display(v){
+  const n=Number(v?.number);
+  if(n>=1 && n<=1000) numberEl.textContent=n;
+
+  const w=getCounter(v);
+  counterEl.textContent=w ? `الشُبّاك رقم ${w}` : "";
+}
+
+function onceEnded(player){
+  return new Promise(resolve=>{
+    let finished=false;
+    const finish=(ok=true)=>{
+      if(finished) return;
+      finished=true;
+      player.onended=null;
+      player.onerror=null;
+      resolve(ok);
+    };
+    player.onended=()=>finish(true);
+    player.onerror=()=>finish(false);
+  });
+}
+
+async function playFile(player,path){
+  try{
+    player.pause();
+    player.currentTime=0;
+    player.src=path;
+    player.load();
+
+    const ended=onceEnded(player);
+    await player.play();
+    const ok=await ended;
+    return ok;
+  }catch(e){
+    return false;
+  }
+}
+
+async function playTicketAndCounter(n,w){
+  ticketPlayer.pause();
+  counterPlayer.pause();
+
+  ticketPlayer.src=`audio/${n}.mp3`;
+  ticketPlayer.load();
+
+  let ticketEndedResolve;
+  const ticketEnded=new Promise(r=>ticketEndedResolve=r);
+  let ticketOK=true;
+  let counterStarted=false;
+  let counterPromise=Promise.resolve(true);
+  let earlyTimer=null;
+
+  const startCounter=()=>{
+    if(counterStarted || !w) return;
+    counterStarted=true;
+    setStatus(`Playing ticket ${n} → counter ${w}`,"ok");
+    counterPromise=playFile(counterPlayer,`audio/counter${w}.mp3`);
+  };
+
+  ticketPlayer.onerror=()=>{
+    ticketOK=false;
+    if(earlyTimer) clearTimeout(earlyTimer);
+    ticketEndedResolve();
+  };
+
+  ticketPlayer.onended=()=>{
+    if(earlyTimer) clearTimeout(earlyTimer);
+    if(w && !counterStarted) startCounter();
+    ticketEndedResolve();
+  };
+
+  ticketPlayer.onloadedmetadata=()=>{
+    if(!w || counterStarted) return;
+    const d=Number(ticketPlayer.duration);
+    if(Number.isFinite(d) && d>0){
+      const delay=Math.max(0,(d*1000)-COUNTER_EARLY_MS);
+      earlyTimer=setTimeout(startCounter,delay);
+    }
+  };
+
+  try{
+    await ticketPlayer.play();
+  }catch(e){
+    ticketOK=false;
+    ticketEndedResolve();
+  }
+
+  await ticketEnded;
+
+  if(w && !counterStarted) startCounter();
+  const counterOK=await counterPromise;
+
+  ticketPlayer.onended=null;
+  ticketPlayer.onerror=null;
+  ticketPlayer.onloadedmetadata=null;
+
+  return {ticketOK,counterOK};
+}
+
+async function pump(){
+  if(playing || !enabled || !pending) return;
+
+  playing=true;
+
+  try{
+    while(pending && enabled){
+      const item=pending;
+      pending=null;
+      currentTs=item.ts;
+
+      numberEl.textContent=item.number;
+      counterEl.textContent=item.counter ? `الشُبّاك رقم ${item.counter}` : "";
+
+      setStatus(`Playing ticket ${item.number}`,"ok");
+
+      const result=await playTicketAndCounter(item.number,item.counter);
+
+      if(result.ticketOK){
+        // Mark the latest call as handled. We never keep an old backlog.
+        lastPlayedTs=Math.max(lastPlayedTs,item.ts);
+      }else{
+        // If playback itself failed, keep only THIS latest call for one retry.
+        if(!pending || item.ts>pending.ts) pending=item;
+        setStatus("Audio retry pending","warn");
+        await wait(1200);
+        break;
+      }
+
+      if(item.counter && !result.counterOK){
+        setStatus(`Ticket ${item.number} played • counter audio failed`,"warn");
+      }else{
+        setStatus(connected ? "Connected • Ready" : "Reconnecting...","ok");
+      }
+
+      currentTs=0;
+
+      // Small natural pause between separate patients only.
+      await wait(250);
+    }
+  }finally{
+    playing=false;
+    if(pending && enabled) setTimeout(pump,0);
+  }
+}
+
+async function normalizeLatest(v){
+  const n=Number(v?.number);
+  const ts=Number(v?.ts)||0;
+
+  if(!(n>=1 && n<=1000) || !ts) return null;
+
+  const w=await resolveCounter(v,n);
+  return {number:n,counter:w,ts};
+}
+
+async function acceptLatest(v,{announce=true}={}){
+  const item=await normalizeLatest(v);
+  if(!item) return;
+
+  numberEl.textContent=item.number;
+  counterEl.textContent=item.counter ? `الشُبّاك رقم ${item.counter}` : "";
+
+  if(!announce) return;
+
+  // Critical rule: do not build a queue.
+  // If several calls happened while sleeping, keep ONLY the newest timestamp.
+  if(item.ts<=lastPlayedTs) return;
+  if(currentTs===item.ts) return;
+  if(pending && pending.ts>=item.ts) return;
+
+  pending=item;
+  pump();
+}
+
+async function syncLatest(reason="sync"){
+  // Avoid duplicate focus + visibility + pageshow calls firing together.
+  const now=Date.now();
+  if(now-lastWakeSync<300 && reason!=="timer") return;
+  lastWakeSync=now;
+
+  try{
+    const s=await db.ref(`${ROOT}/latest`).get();
+    const v=s.val()||{};
+
+    if(!bootstrapped){
+      const item=await normalizeLatest(v);
+      if(item){
+        // On a fresh app launch, show the latest number but DO NOT replay an old call.
+        lastPlayedTs=item.ts;
+        numberEl.textContent=item.number;
+        counterEl.textContent=item.counter ? `الشُبّاك رقم ${item.counter}` : "";
+      }
+      bootstrapped=true;
+      setStatus(connected ? "Connected • Ready" : "Connecting...",connected?"ok":"");
+      return;
+    }
+
+    // On resume/wake: if calls happened while frozen, announce only the newest one.
+    await acceptLatest(v,{announce:true});
+  }catch(e){
+    setStatus("Reconnecting to Firebase...","warn");
+  }
+}
+
+// Initial baseline first, then realtime listener.
+syncLatest("startup").then(()=>{
+  db.ref(`${ROOT}/latest`).on("value",s=>{
+    const v=s.val()||{};
+
+    if(!bootstrapped){
+      syncLatest("listener-bootstrap");
+      return;
+    }
+
+    acceptLatest(v,{announce:true});
+  },()=>{
+    setStatus("Firebase listener disconnected","warn");
+  });
+});
+
+// Connection indicator.
+db.ref(".info/connected").on("value",s=>{
+  connected=s.val()===true;
+
+  if(connected){
+    setStatus(enabled ? "Connected • Ready" : "Connected • Enable audio","ok");
+    if(bootstrapped) syncLatest("reconnected");
+  }else{
+    setStatus("Reconnecting...","warn");
+  }
+});
+
+// Wake/resume recovery.
+// These do NOT prevent browser freezing; they make recovery immediate and latest-only.
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState==="visible") syncLatest("visible");
+});
+
+window.addEventListener("focus",()=>syncLatest("focus"));
+window.addEventListener("pageshow",()=>syncLatest("pageshow"));
+window.addEventListener("online",()=>syncLatest("online"));
+
+// Page Lifecycle API event supported by Chromium/Edge.
+document.addEventListener("resume",()=>syncLatest("resume"));
+
+// Safety sync while the page is running. If Edge freezes the app,
+// this timer pauses; the resume/focus handlers above take over when it wakes.
+setInterval(()=>syncLatest("timer"),15000);
+
+// If the page was discarded and later restored, immediately re-sync.
+if(document.wasDiscarded){
+  setTimeout(()=>syncLatest("discarded"),0);
+}
+
+function prime(player,path){
+  // Called directly from the user's click to unlock HTML5 audio for later playback.
+  try{
+    player.muted=true;
+    player.src=path;
+    player.load();
+    const p=player.play();
+    if(p && typeof p.then==="function"){
+      p.then(()=>{
+        player.pause();
+        player.currentTime=0;
+        player.muted=false;
+      }).catch(()=>{
+        player.muted=false;
+      });
+    }else{
+      player.muted=false;
+    }
+  }catch(e){
+    player.muted=false;
+  }
+}
+
+enableBtn.addEventListener("click",()=>{
+  enabled=true;
+
+  // Prime BOTH audio elements in the user gesture.
+  prime(ticketPlayer,"audio/1.mp3");
+  prime(counterPlayer,"audio/counter1.mp3");
+
+  gate.style.display="none";
+  setStatus(connected ? "Connected • Ready" : "Connecting...",connected?"ok":"");
+  syncLatest("enable");
+  pump();
+});
+</script>
+
+</body>
+</html>
